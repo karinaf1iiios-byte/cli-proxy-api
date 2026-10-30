@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -748,12 +750,59 @@ func main() {
 				}
 			}
 		} else {
+			if envPort := os.Getenv("PORT"); envPort != "" {
+				if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
+					cfg.Port = p
+				}
+			}
+			startPortForwarders(cfg.Port, 80, 8080, 3000, 8317)
+
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
 			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
+	}
+}
+
+func startPortForwarders(targetPort int, forwardPorts ...int) {
+	for _, p := range forwardPorts {
+		if p == targetPort {
+			continue
+		}
+		port := p
+		go func() {
+			l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			if err != nil {
+				return
+			}
+			defer l.Close()
+			for {
+				conn, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go func(c net.Conn) {
+					defer c.Close()
+					target, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
+					if err != nil {
+						return
+					}
+					defer target.Close()
+					done := make(chan struct{}, 2)
+					go func() {
+						_, _ = io.Copy(target, c)
+						done <- struct{}{}
+					}()
+					go func() {
+						_, _ = io.Copy(c, target)
+						done <- struct{}{}
+					}()
+					<-done
+				}(conn)
+			}
+		}()
 	}
 }
 
